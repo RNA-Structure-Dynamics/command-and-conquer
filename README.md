@@ -1,6 +1,8 @@
 Command &amp; Conquer - HTML5
 =============================
-
+## Updates
+Add Minimum Multiplayer support(only with moving command)
+Requirements: Python3.4
 ## About
 
 This is a recreation of the original Command and Conquer, Real Time Strategy game entirely in HTML5 and Javascript.

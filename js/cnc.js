@@ -1,8 +1,88 @@
-
+var multiplayer;
+var slowdown=0;
 $(function() {
     var canvas = $('#canvas')[0];
 	var context = canvas.getContext('2d');
-	
+	function show_waiting_str(){
+		context.fillStyle='green';
+		context.font = '16px "Command and Conquer"';
+		context.fillText("Waiting another player to join...",game.viewportLeft+80,game.viewportTop+20);
+	}
+	function waiting_for_next_turn(){
+		clearInterval(game.animationLoop);
+		game.messageVisible=false;
+		game.viewportLeft=0;
+		game.viewportTop=0;
+		context.clearRect(0,0,640,535);
+		show_waiting_str();
+	}
+	multiplayer={
+		websocket_url:"ws://127.0.0.1:12345/",
+		websocket:undefined,
+		currentTick:0,
+		lastReceivedTick:-1,
+		start:function(){
+			this.websocket = new WebSocket(this.websocket_url);
+            try {
+                this.websocket.onopen = function (msg) {
+				console.log("连接成功！");
+                };
+
+                this.websocket.onmessage = function (msg) {
+                    if (typeof msg.data == "string") {
+                        multiplayer.handleWebSocketMessage(msg.data);
+                    }
+                    else {
+                        console.log("非文本消息");
+                    }
+                };
+
+                this.websocket.onclose = function (msg) { console.log("socket closed!") };
+            }
+            catch (ex) {
+                console.log(ex);
+            }
+		},
+		sendWebSocketMessage:function(msgObj){
+			this.websocket.send(JSON.stringify(msgObj));
+		},
+		handleWebSocketMessage:function(msgdata){
+			//console.log(msgdata)
+			var messageObject=JSON.parse(msgdata);
+			switch(messageObject.type){
+			case "joined_room":
+ 				multiplayer.roomID = messageObject.roomID;
+ 				multiplayer.team = messageObject.team;
+ 				show_waiting_str();
+				//game.start();
+ 				break;
+			case "start_game":
+				if(!game.running){
+					game.start();
+					game.running=true;
+				}
+				break;
+			case "end_game":
+				if(game.running){
+					game.messageVisible=true;
+					game.running=false;
+					sounds.play('mission_accomplished');
+					game.end();
+					setTimeout(waiting_for_next_turn,3000);
+				}
+				break;
+			case "latency_ping":
+				multiplayer.sendWebSocketMessage({type:"latency_pong"});
+				break;
+			case "game_tick":
+				multiplayer.lastReceivedTick=messageObject.tick;
+				multiplayer.commands=messageObject.commands;
+				break;
+			}
+				
+			//console.log(messageObject);
+		}
+	}
 
 	var mouse = {
 	    x:0,
@@ -378,6 +458,7 @@ $(function() {
 	        
 	    },
 	    loadAllCursors:function(){
+			if(mouse.loaded)return
 	        mouse.spriteImage = this.preloadImage('cursors.png');
 	        mouse.loadCursor('attack',15,12,8);
 	        mouse.loadCursor('big_detonate',15,12,3);
@@ -428,6 +509,7 @@ $(function() {
 	    viewportDeltaX:0,
 	    viewportDeltaY:0,
 	    gridSize:24,
+		running:false,
 	    animationLoop:null,
 	    animationTimeout:50,
 	    debugMode:false,
@@ -493,13 +575,7 @@ $(function() {
     	        
     	            var x = unit.x;
         	        var y = unit.y;
-        	        //var collisionRadius = unit.collisionRadius/game.gridSize;
         	        game.buildingObstructionGrid[Math.floor(y)][Math.floor(x)] = 1;
-    	            //game.obstructionGrid[Math.floor(y-collisionRadius)][Math.floor(x-collisionRadius)] = 1;
-    	            //game.obstructionGrid[Math.floor(y-collisionRadius)][Math.floor(x+collisionRadius)] = 1;
-    	            //game.obstructionGrid[Math.floor(y+collisionRadius)][Math.floor(x-collisionRadius)] = 1;
-    	            //game.obstructionGrid[Math.floor(y+collisionRadius)][Math.floor(x+collisionRadius)] = 1;
-    	        
     	    };
     	    
     	    for (var i = this.overlay.length - 1; i >= 0; i--){
@@ -862,8 +938,19 @@ $(function() {
     	    // Draw the overlay
     	    // Draw the buildings
     	    // Any animation if necessary
-    	    game.moveObjects();
+			if(slowdown%2==1&&multiplayer.currentTick<=multiplayer.lastReceivedTick){
+				slowdown=0;
+				for(var i=0;i<multiplayer.commands.length;i++){
+					game.processCommand(multiplayer.commands[i].uids,multiplayer.commands[i].details);
+				}
+				 if(!multiplayer.sentCommandForTick)
+					 game.sendCommand();
+				multiplayer.currentTick++;
+				multiplayer.sentCommandForTick=false;
+			}
+    	    slowdown++;
     	    // Draw the units
+			game.moveObjects();
     	    game.drawObjects();
     	    
     	    //
@@ -884,9 +971,9 @@ $(function() {
     	    //
     	    
     	},
-    	messageVisible:true,
+    	messageVisible:false,
     	messageHeadingVisible : true,
-    	messageText:'\nCreate a base by deploying your MCV. Build a power plant and weapons factory.\n\nUse your tanks to get rid of all enemy presence in the area.',
+    	messageText:'Awaiting another player to join...',
     	drawMessage:function(){
     	    if(!this.messageVisible){
     	        return;
@@ -984,8 +1071,20 @@ $(function() {
                 }
             }
     	},
+		processCommand:function(uids,details){
+			var toObject;
+			for(var i in uids){
+				var local_uid=uids[i];
+				var item=game.getUnitByUid(local_uid);
+				if(item){
+					item.orders=details
+					if(details.type='move')
+						sounds.play(game.selectedUnits[i].type+'_move');              	        
+				}
+			}
+		},
     	click: function(ev,rightClick){
-    	    
+    	    var local_uids=[];
     	    if (game.messageVisible){
     	        if (mouse.x>= 290 && mouse.x<= 350 && mouse.y>=310 && mouse.y <= 325){
     	            game.messageVisible = false;
@@ -1098,14 +1197,27 @@ $(function() {
                             // Don't do anything
         	            } else {
         	                for (var i = game.selectedUnits.length - 1; i >= 0; i--){
-                	           game.selectedUnits[i].orders = {type:'move',to:{x:mouse.gridX,y:mouse.gridY}}; 
-                	           sounds.play(game.selectedUnits[i].type+'_move');
-                	        };
+								local_uids.push(game.selectedUnits[i].uid);
+                	           }
+							   game.sendCommand(local_uids,{type:'move',to:{x:mouse.gridX,y:mouse.gridY}}); 
+                	        
+                	        
         	            }
             	    }
     	        }
     	    }
 	    },
+		sendCommand:function(uids,details){
+			multiplayer.sentCommandForTick=true;
+			multiplayer.sendWebSocketMessage({type:"command",uids:uids,details:details,currentTick:multiplayer.currentTick});
+		},
+		getUnitByUid:function(given_uid){
+			for(var i=0;i<game.units.length;i++){
+				if(game.units[i].uid==given_uid){
+					return game.units[i];
+				}
+			}
+		},
     	start: function(){
     	    // Show main menu screen
     	    // Wait for level click
@@ -1123,12 +1235,28 @@ $(function() {
     	    
     	    mouse.listenEvents();
             fog.init();
-            
-            game.viewportX = 96;
-            game.viewportY = 264;
+            if(game.currentLevel.team=='nod'){
+            	game.viewportX = 96;
+            	game.viewportY = 264;
+    		}
             sidebar.visible = false;
             // Enemy Stuff
-            this.turrets.push(turrets.add({name:'gun-turret',x:8,y:6,turretDirection:16,team:'nod'}));
+            for(var i=0;i<this.currentLevel.teamStartingItems.length;i++){
+            	var tmp_obj=this.currentLevel.teamStartingItems[i];
+            	var delta_x=this.currentLevel.spawningLocations[0].x;
+            	var delta_y=this.currentLevel.spawningLocations[0].y;
+            	var delta_x1=this.currentLevel.spawningLocations[1].x;
+            	var delta_y1=this.currentLevel.spawningLocations[1].y;
+            	if(tmp_obj.type='vehicles'){
+            	this.units.push(vehicles.add({name:tmp_obj.name,x:tmp_obj.x+delta_x,y:tmp_obj.y+delta_y,team:'nod'}));
+            	this.units.push(vehicles.add({name:tmp_obj.name,x:tmp_obj.x+delta_x1,y:tmp_obj.y+delta_y1,team:'gdi'}));				
+            	}
+            	//this.units.push(vehicles.add($.extend(tmp_obj,{team:'nod'})));
+            }
+			for(var i=0;i<this.units.length;i++){
+				this.units[i]['uid']=i;
+			}
+      /*      this.turrets.push(turrets.add({name:'gun-turret',x:8,y:6,turretDirection:16,team:'nod'}));
             this.turrets.push(turrets.add({name:'gun-turret',x:9,y:3,turretDirection:16,team:'nod'}));
             this.turrets.push(turrets.add({name:'gun-turret',x:7,y:5,turretDirection:16,team:'nod'}));
             this.turrets.push(turrets.add({name:'gun-turret',x:8,y:2,turretDirection:16,team:'nod'}));
@@ -1139,85 +1267,26 @@ $(function() {
             this.turrets.push(turrets.add({name:'gun-turret',x:11,y:23,turretDirection:18,team:'nod'}));
             this.turrets.push(turrets.add({name:'gun-turret',x:10,y:24,turretDirection:20,team:'nod'}));
             this.turrets.push(turrets.add({name:'gun-turret',x:9,y:25,turretDirection:24,team:'nod'}));
-            //this.turrets.push(turrets.add({name:'gun-turret',x:9,y:26,turretDirection:26,team:'nod'}));
             
-            this.buildings.push(buildings.add({name:'refinery',team:'nod',x:26,y:8,status:'build',health:200}));
-            //this.units.push(vehicles.add({name:'harvester',team:'nod',x:24,y:18,moveDirection:0}));
-            
-            
-            //this.units.push(vehicles.add({name:'harvester',x:25,y:18,moveDirection:0}));
-            
+            this.buildings.push(buildings.add({name:'refinery',team:'nod',x:26,y:8,status:'build',health:200}));   
             this.buildings.push(buildings.add({name:'construction-yard',x:1,y:14,team:'nod'}));
             this.buildings.push(buildings.add({name:'power-plant',x:5,y:14,team:'nod'}));
             
             this.buildings.push(buildings.add({name:'hand-of-nod',x:5,y:19,team:'nod'}));
             
-            //this.buildings.push(buildings.add({name:'barracks',x:4,y:14,team:'nod'}));             
-            //this.buildings.push(buildings.add({name:'power-plant',x:18,y:10,health:200,team:'nod'})); 
-    	    this.units.push(vehicles.add({name:'light-tank',x:7,y:6,team:'nod',orders:{type:'patrol',from:{x:9,y:24},to:{x:12,y:8}}}));      	    
+             this.units.push(vehicles.add({name:'light-tank',x:7,y:6,team:'nod',orders:{type:'patrol',from:{x:9,y:24},to:{x:12,y:8}}}));      	    
     	    this.units.push(vehicles.add({name:'light-tank',x:2,y:20,team:'nod',orders:{type:'patrol',from:{x:2,y:5},to:{x:6,y:20}}}));
     	    this.units.push(vehicles.add({name:'light-tank',x:5,y:10,team:'nod',orders:{type:'patrol',from:{x:17,y:12},to:{x:22,y:2}}}));
     	    
-    	    //this.units.push(vehicles.add({name:'light-tank',x:2,y:2,team:'nod',orders:{type:'patrol',from:{x:25,y:5},to:{x:17,y:25}}}));
     	    this.units.push(vehicles.add({name:'light-tank',x:4,y:23,team:'nod',orders:{type:'patrol',from:{x:4,y:23},to:{x:22,y:25}}}));
     	    this.units.push(vehicles.add({name:'light-tank',x:2,y:10,team:'nod',orders:{type:'protect',target:game.units[0]}}));
 
-    	    this.units.push(vehicles.add({name:'mcv',x:23.5,y:23.5,moveDirection:0,orders:{type:'move',to:{x:23,y:21}}}));
-    	    this.units.push(vehicles.add({name:'light-tank',x:23,y:27,moveDirection:0,orders:{type:'move',to:{x:22,y:23}}}));
-    	    this.units.push(vehicles.add({name:'light-tank',x:24,y:27,moveDirection:0,orders:{type:'move',to:{x:24,y:23}}}));
-    	    
-    	    
-    	    //this.buildings.push(buildings.add({name:'weapons-factory',x:18,y:6}));
-    	    
-    	    
-    	    //this.buildings.push(buildings.add({name:'weapons-factory',x:24,y:18}));
-
-    	    
-    	    //this.units.push(vehicles.add({name:'mcv',x:7,y:4,moveDirection:8}));
-    	    //this.units.push(infantry.add({name:'minigunner',x:27,y:12,team:'nod'}));
-    	    //this.units.push(infantry.add({name:'minigunner',x:6,y:22,team:'nod'}));
-    	    //this.units.push(infantry.add({name:'minigunner',x:5,y:22,team:'nod'}));
-    	    //this.units.push(infantry.add({name:'minigunner',x:28,y:12,team:'nod'}));
-    	    
-    	    
-    	    
-    	    //this.units.push(vehicles.add({name:'light-tank',x:23,y:25,moveDirection:0}));
-    	    
-    	    //sounds.play('reinforcements_have_arrived');
-    	    //this.units.push(infantry.add({name:'minigunner',x:8,y:13}));
-    	    //this.units.push(vehicles.add({name:'light-tank',x:5,y:13,orders:{type:'patrol',from:{x:5,y:13},to:{x:4,y:4}},team:'nod'})); 
-        	//this.units.push(vehicles.add({name:'light-tank',x:16,y:8,orders:{type:'protect',target:game.units[3]}}));
-    	    
-    	    /*
-    	    this.units.push(infantry.add({name:'minigunner',x:7,y:13,team:'nod'}));
-    	    this.units.push(vehicles.add({name:'light-tank',x:5,y:13,orders:{type:'patrol',from:{x:5,y:13},to:{x:4,y:4}},team:'nod'})); 
-    	    this.units.push(vehicles.add({name:'light-tank',x:16,y:8,orders:{type:'protect',target:game.units[3]}}));
-    	    this.units.push(vehicles.add({name:'light-tank',x:10,y:10,orders:{type:'protect',target:game.units[0]},team:'nod'}));
-    	    
-    	    this.units.push(turrets.add({name:'gun-turret',x:12,y:13,moveDirection:9,team:'nod'}));
-    	    
+    	    this.units.push(vehicles.add({name:'mcv',x:23.5,y:23.5,team:'gdi',moveDirection:0,orders:{type:'move',to:{x:23,y:21}}}));
+    	    this.units.push(vehicles.add({name:'light-tank',x:23,y:27,team:'gdi',moveDirection:0,orders:{type:'move',to:{x:22,y:23}}}));
+    	    this.units.push(vehicles.add({name:'light-tank',x:24,y:27,team:'gdi',moveDirection:0,orders:{type:'move',to:{x:24,y:23}}}));
     	    */
-    	    //this.buildings.push(buildings.add({name:'power-plant',x:12,y:8,health:100,primaryBuilding:true})); 
-    	    //this.buildings.push(buildings.add({name:'construction-yard',x:9,y:4,primaryBuilding:true})); 
-    	    //this.buildings.push(buildings.add({name:'barracks',x:12,y:4,status:'build'}));
-    	    //this.buildings.push(buildings.add({name:'weapons-factory',x:15,y:12})); 
-    	    /*this.buildings.push(buildings.add({name:'construction-yard',x:3,y:9,status:'build',team:'nod'}));  
     	    
-    	    
-    	    this.buildings.push(buildings.add({name:'barracks',x:12,y:4}));
-    	    this.buildings.push(buildings.add({name:'barracks',x:14,y:4,team:'nod'})); 
-    	    
-    	    this.buildings.push(buildings.add({name:'power-plant',x:12,y:8,status:'build',health:100,primaryBuilding:true})); 
-    	    
-    	    this.buildings.push(buildings.add({name:'power-plant',x:18,y:10,status:'build',health:200,team:'nod'})); 
-    	    
-    	    this.buildings.push(buildings.add({name:'weapons-factory',x:15,y:12,status:'construct',health:200})); 
-    	    
-    	    
-    	    this.buildings.push(buildings.add({name:'weapons-factory',x:13,y:16,status:'build',health:200,team:'nod'}));
-    	    
-            */
-    	    this.animationLoop = setInterval(this.animate,this.animationTimeout);
+    	   this.animationLoop = setInterval(this.animate,this.animationTimeout);
     	    
     	    this.tiberiumLoop = setInterval(function(){
     	        for (var i=0; i < game.overlay.length; i++) {
@@ -1234,7 +1303,7 @@ $(function() {
  	    
     	},
     	end:function(){
-    	    //clearInterval(this.animationLoop);
+    	    
     	    clearInterval(this.statusLoop);
     	    clearInterval(this.tiberiumLoop);
     	    sidebar.visible = false;
@@ -3657,7 +3726,7 @@ $(function() {
 	            ], //the trees and tiberium .. can terrain and overlay be in the same?
 	            gridWidth:31,
 	            gridHeight:31,
-	            team:'gdi',
+	            //team:'nod',
 	            briefing:'This is a warning \n for all of you \n Kill enemy troops and have some fun',
 	            items: {
 	                infantry: [],// ['minigunner'],
@@ -3666,6 +3735,17 @@ $(function() {
 	                ships:['bigboat'],
 	                turrets:['gun-turret']
 	            },
+				teamStartingItems:[
+				 {"type":"vehicles","name":"mcv","x":0,"y":0},
+				 {"type":"vehicles","name":"harvester","x":2,"y":0},
+				 {"type":"vehicles","name":"light-tank","x":2,"y":1},
+				 {"type":"vehicles","name":"light-tank","x":3,"y":0},
+				 {"type":"vehicles","name":"light-tank","x":3,"y":1},
+				 ],
+				 spawningLocations:[
+				 { "x":25, "y":18,"startX":32,"startY":0},
+				 { "x":3, "y":3,"startX":0,"startY":0}//startX and startY is the panning location
+				 ],
 	            scriptedEvents:[
                     {   id:'trigger1',description:'Initial four reinforcement troops land on beach',
                             actions:[
@@ -3709,6 +3789,9 @@ $(function() {
 	        //level.mapImage = new Image();
 	        level.mapImage = this.preloadImage(this.levelDetails[id].mapUrl);
 	        var details = this.levelDetails[id];
+			level.teamStartingItems=details.teamStartingItems;
+			level.spawningLocations=details.spawningLocations;
+			level.team=multiplayer.team;
 	        for (item in details.items){
 	            if(item=="vehicles"){
 	                for (var i = details.items[item].length - 1; i >= 0; i--){
@@ -3763,7 +3846,6 @@ $(function() {
 	        level.overlay = overlayArray;
 	        
 	        sidebar.cash = details.startingCash;
-	        level.team = details.team;
 	        return level;
 	    }   
 	};
@@ -3808,7 +3890,7 @@ $(function() {
             this.sound_list['mission_failure'] = [this.load('mission_failure','voice')];
             
             this.sound_list['construction'] = [this.load('construction','sounds')];
-            this.sound_list['crumble'] = [this.load('crumble','sounds')];
+           // this.sound_list['crumble'] = [this.load('crumble','sounds')];
             this.sound_list['sell'] = [this.load('sell','sounds')];
             this.sound_list['button'] = [this.load('button','sounds')];
             //this.sound_list['clock'] = [this.load('clock','sounds')];
@@ -4388,7 +4470,7 @@ $(function() {
     
     
 	// begin the game
-    game.start();
+    multiplayer.start();
     $('#debugger').toggle();
     
     $('#debug_mode').bind('change',function() {
